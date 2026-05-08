@@ -239,3 +239,35 @@ db.notifications.updateMany(
   { $set: { isRead: true, readAt: new ISODate() } }
 );
 ```
+
+# Stage 3
+
+## 1. Query Analysis
+
+Yes, the query accurately retrieves unread notifications for a specific student and sorts them by newest first.
+
+It is slow because without an appropriate index, the database engine must perform a Full Table Scan. It reads through all 5,000,000 rows to find the matching studentID and isRead values, and then performs a computationally expensive in-memory sort on createdAt before returning the results.
+
+## 2. Optimization
+
+Create a Composite Index on (studentID, isRead, createdAt).
+
+- Before Index: O(N) where N is 5,000,000 rows.
+
+- After Index: The DB engine traverses a B-Tree structure directly to the relevant records. The time complexity drops to O(log N) for the lookup. Because the index also stores createdAt, the sorting is pre-computed, eliminating the sort overhead entirely.
+
+## 3. Index Every Column
+
+No, this is terrible advice.
+
+Every time a new notification is inserted, updated, or deleted, every single index must also be updated. This severely degrades write performance.
+
+Indexes consume significant disk space and RAM. Indexing 5,000,000 rows across every column would bloat the database massively.
+
+## 4. Placement Notifications Query
+```
+SELECT DISTINCT studentID
+FROM notifications
+WHERE notificationType = 'Placement'
+  AND createdAt >= CURRENT_DATE - INTERVAL '7 days';
+```
