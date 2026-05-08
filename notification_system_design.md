@@ -154,3 +154,88 @@ Real-Time Payload Example (Server to Client):
   }
 }
 ```
+
+# Stage 2
+
+## 1.  Persistent Storage Choice
+
+Suggested Database: MongoDB (NoSQL Document Store)
+
+Explanation: MongoDB is an excellent choice for a campus notification system for the following reasons:
+
+1. Write-Heavy Workload: Notifications systems typically experience high write volumes (especially during campus-wide broadcasts). MongoDB excels at rapid, high-throughput ingestions.
+
+2. Schema Flexibility: Different notification types might require different metadata in the future (e.g., an 'event' notification might need an eventId or rsvpLink, while a 'result' might need a score). A NoSQL document structure allows us to store these varying payloads without rigid schema migrations.
+
+3. Horizontal Scalability: As the student base and historical data grow, MongoDB easily scales out across multiple shards to distribute the load natively.
+
+## 2. Database Schema (Document Structure)
+
+In MongoDB, data is stored as BSON documents within a notifications collection.
+
+```
+{
+  "_id": ObjectId("653bdf1a2e9b1d0012a45678"),
+  "userId": "123e4567-e89b-12d3-a456-426614174000",
+  "type": "placements",
+  "title": "Amazon Interview Shortlist",
+  "message": "Congratulations! You have been shortlisted...",
+  "isRead": false,
+  "actionUrl": "/placements/amazon",
+  "createdAt": ISODate("2023-10-27T14:30:00Z"),
+  "readAt": null
+}
+```
+
+Required Indexes:
+
+To ensure our API queries run efficiently, we must create the following indexes:
+
+```
+db.notifications.createIndex({ userId: 1, createdAt: -1 })
+
+db.notifications.createIndex({ userId: 1, isRead: 1 })
+```
+
+## 3. Scalability Problems & Solutions
+
+As the campus platform grows and generates millions of notifications, several issues will arise:
+
+**Problem A: Unbounded Collection Growth:**
+Over time, millions of read notifications will bloat the database, slowing down queries and increasing RAM usage.
+* **Solution (TTL Indexes):** Use MongoDB's Time-To-Live index to auto-delete documents older than 6 months (`db.notifications.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 15552000 })`).
+
+**Problem B: Heavy Read Load for Unread Counts:**
+Constantly running `countDocuments()` every time a student opens the app is resource-heavy.
+* **Solution (Caching):** Store the user's unread count in a Redis cache, or maintain an integer counter field directly on the `users` collection, updating it via `$inc` operations.
+
+---
+
+## 4. NoSQL Queries (Stage 1 APIs)
+
+**A. Fetch Notifications (Paginated)**
+```
+db.notifications.find({ userId: "user-uuid", type: "placements" })
+  .sort({ createdAt: -1 })
+  .skip(0)
+  .limit(20);
+```
+**B. Get Unread Count**
+```
+db.notifications.countDocuments({ userId: "user-uuid", isRead: false });
+```
+**C. Mark Single as Read**
+```
+db.notifications.findOneAndUpdate(
+  { _id: ObjectId("notif-id"), userId: "user-uuid", isRead: false },
+  { $set: { isRead: true, readAt: new ISODate() } },
+  { returnDocument: "after" }
+);
+```
+**D. Mark All as Read**
+```
+db.notifications.updateMany(
+  { userId: "user-uuid", isRead: false },
+  { $set: { isRead: true, readAt: new ISODate() } }
+);
+```
