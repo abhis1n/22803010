@@ -303,3 +303,75 @@ Offload the caching responsibility directly to the student's device.
 * **Tradeoffs:**
     * Pros: Zero cost for server infrastructure; immediate UI rendering; works well offline or on slow networks.
     * Cons: Data can be cleared by the user at any time; different devices (e.g., switching from phone to laptop) will have different local states, requiring a full sync.
+
+# Stage 5
+
+## 1. Problems with Proposed Implementation
+The provided pseudocode uses a synchronous, blocking loop which is disastrous for 50,000 iterations:
+* **Latency / Timeouts:** If `send_email` takes just 100ms, processing 50,000 students sequentially will take over 80 minutes.
+* **Lack of Fault Tolerance:** A single unhandled exception (e.g., a network blip during `send_email`) will crash the loop. The remaining students in the array will receive nothing.
+* **Tight Coupling:** The system rigidly binds internal operations (DB saves) with external network calls (Email API).
+
+## 2. Handling the 200 Mid-way Failures
+* In the current synchronous setup, the system is left in a corrupted state. Because there is no state tracking per student in the loop, the admin cannot easily know *which* 200 emails failed without manually writing a script to parse text logs.
+* Furthermore, they cannot safely re-run the `notify_all` function. Doing so would send duplicate emails and app notifications to the thousands of students who already successfully processed before the crash.
+
+## 3. Redesigning for Reliability and Speed
+To make this process reliable and fast, we must transition to an **Asynchronous, Event-Driven Architecture** utilizing **Message Queues**.
+* **Speed:** The HTTP API simply accepts the request, drops a single "Broadcast" job into a message queue, and immediately returns a `200 OK` to HR. Background worker nodes consume the queue concurrently, processing thousands of tasks per second in parallel.
+* **Reliability:** Each student's notification is treated as an isolated message. If one fails, it is sent to a **Dead Letter Queue (DLQ)** for exponential backoff and automatic retry, without affecting the other 49,999 students.
+
+## 4. Decoupling DB Saves and Emails
+**Should they happen together? No.**
+* **Why not?** Database inserts and external Email APIs have completely different latency profiles and failure domains. The database is internal, fast, and highly available. An external Email API (like SendGrid or AWS SES) is slower, subject to strict rate limits, and prone to third-party outages.
+* If the Email API goes down, the system should still successfully save to the database so students can see the notification when they log into the app. Coupling them means a failure in the email network call rolls back or blocks the database insert.
+
+## 5. Revised Pseudocode
+```
+async function notifyAllHandler(req, res) {
+    const { studentIds, message } = req.body;
+
+    await MessageBroker.publish('broadcast_events', { studentIds, message });
+
+    return res.status(200).json({ success: true, message: "Processing in background" });
+}
+
+MessageBroker.consume('broadcast_events', async (job) => {
+    const { studentIds, message } = job.data;
+
+    for (const studentId of studentIds) {
+        await MessageBroker.publish('db_insert_queue', { studentId, message });
+        await MessageBroker.publish('email_send_queue', { studentId, message });
+        await MessageBroker.publish('app_push_queue', { studentId, message });
+    }
+});
+
+
+MessageBroker.consume('db_insert_queue', async (job, retry) => {
+    try {
+        await DB.collection('notifications').insertOne({
+            userId: job.data.studentId,
+            message: job.data.message,
+            isRead: false
+        });
+    } catch (error) {
+        retry();
+    }
+});
+
+MessageBroker.consume('email_send_queue', async (job, retry) => {
+    try {
+        await EmailAPI.send(job.data.studentId, job.data.message);
+    } catch (error) {
+        retry();
+    }
+});
+
+MessageBroker.consume('app_push_queue', async (job, retry) => {
+    try {
+        await WebSocketServer.to(`room_${job.data.studentId}`).emit('new_notification', job.data.message);
+    } catch (error) {
+        retry();
+    }
+});
+```
