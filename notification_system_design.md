@@ -375,3 +375,23 @@ MessageBroker.consume('app_push_queue', async (job, retry) => {
     }
 });
 ```
+# Stage 6
+
+## Priority Inbox Implementation Strategy
+
+### 1. Priority Logic
+Priority is calculated using a multi-level sorting algorithm:
+* **Primary Factor (Weight):** Notifications are strictly categorized by their type. `Placement` (Weight 3) > `Result` (Weight 2) > `Event` (Weight 1).
+* **Secondary Factor (Recency):** If two notifications have the exact same weight (e.g., two Placement updates), the tie is broken by parsing the `Timestamp` and surfacing the most recent one first.
+
+### 2. Efficiently Maintaining the Top 'n' (Streaming Data)
+When loading the inbox for the first time, sorting the entire dataset is required. However, as **new** notifications stream in via WebSockets (as designed in Stage 1), we absolutely should not re-sort the entire database array.
+
+**Solution: Bounded Min-Heap (Priority Queue)**
+To maintain the top 10 efficiently in real-time, the backend (or frontend client) should maintain a **Min-Heap** data structure constrained to a maximum size of `n` (10).
+
+* **How it works:** The Min-Heap is ordered so that the *lowest priority* notification out of the top 10 is always at the root node.
+* **When a new notification arrives:** We compare it to the root node (the 10th best notification).
+    * If the new notification has a *lower* priority than the root, it is instantly discarded.
+    * If the new notification has a *higher* priority, we pop the root out of the heap and insert the new notification.
+* **Time Complexity:** Inserting into a heap of size 10 takes **O(log k)** time (where k is the size of the heap, so O(log 10), which is effectively **O(1)** constant time). This is vastly superior to the **O(N log N)** cost of re-sorting the whole list every time an event occurs.
