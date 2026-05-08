@@ -271,3 +271,35 @@ FROM notifications
 WHERE notificationType = 'Placement'
   AND createdAt >= CURRENT_DATE - INTERVAL '7 days';
 ```
+
+# Stage 4
+
+## Problem Analysis
+The current architecture fetches notifications directly from the primary database on every page load for every student. This creates massive read pressure, overwhelming the database engine, causing high latency, and resulting in a poor user experience.
+
+## Solutions to Improve Performance
+
+To resolve this, we must implement caching and optimize how the frontend consumes data.
+
+### Strategy 1: Distributed In-Memory Caching (Redis/Memcached)
+Instead of querying the database on every page load, we store the recent notifications and unread counts in an extremely fast, in-memory datastore like Redis.
+
+* **How it works:**
+    1.  When a student loads the page, the backend first checks Redis for their notifications.
+    2.  If found (Cache Hit), Redis returns the data instantly (sub-millisecond latency).
+    3.  If not found (Cache Miss), the backend queries MongoDB, returns the data to the user, and simultaneously writes it to Redis with a Time-To-Live (TTL) so subsequent requests are fast.
+    4.  When a new notification is generated, the backend updates both MongoDB and the Redis cache.
+* **Tradeoffs:**
+    * Pros: Drastically reduces read load on the primary DB; provides lightning-fast responses to the frontend.
+    * Cons: Introduces system complexity (cache invalidation is notoriously difficult); increases infrastructure costs; potential for "stale data" if the cache and DB get out of sync.
+
+### Strategy 2: Client-Side Caching & Local Storage
+Offload the caching responsibility directly to the student's device.
+
+* **How it works:**
+    1.  The frontend fetches notifications and stores them in the browser's `localStorage` or `IndexedDB`.
+    2.  On subsequent page loads, the frontend immediately renders the UI using the local data.
+    3.  It then makes a lightweight background request to the server (e.g., passing a `lastUpdated` timestamp) asking *only* for new notifications generated since that time, rather than the entire list.
+* **Tradeoffs:**
+    * Pros: Zero cost for server infrastructure; immediate UI rendering; works well offline or on slow networks.
+    * Cons: Data can be cleared by the user at any time; different devices (e.g., switching from phone to laptop) will have different local states, requiring a full sync.
